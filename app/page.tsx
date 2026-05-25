@@ -22,7 +22,7 @@ import { getUsage, lookupUsage } from "@/lib/usage";
 import { getSessions, summarizeSessions } from "@/lib/sessions";
 import { getContextFiles } from "@/lib/files";
 import { getHooks } from "@/lib/hooks";
-import { Chip, MiniStat } from "./components/Receipt";
+import { MiniStat } from "./components/Receipt";
 import { toggleUserItem } from "./actions";
 
 const fmt = new Intl.NumberFormat("en-US");
@@ -69,6 +69,8 @@ export default async function Cockpit() {
     (globalClaudeMd?.tokens ?? 0) +
     (biggestMemoryMd?.tokens ?? 0) +
     sessionStartHookTokens;
+  const contextRowCount =
+    (globalClaudeMd ? 1 : 0) + (biggestMemoryMd ? 1 : 0) + (sessionStartHookTokens > 0 ? 1 : 0);
 
   return (
     <main className="flex-1 font-mono bg-zinc-50 dark:bg-zinc-950">
@@ -88,14 +90,13 @@ export default async function Cockpit() {
         {/* PRIMARY RECEIPT — per-turn baseline */}
         <section className="flex justify-center mb-6">
           <div className="w-full max-w-md rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-            {/* Stripe-style chip strip */}
-            <div className="flex items-center gap-1 px-4 pt-3 pb-2 border-b border-zinc-200 dark:border-zinc-800">
-              <Chip active>30D</Chip>
-              <Chip>7D</Chip>
-              <Chip>90D</Chip>
+            <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-zinc-200 dark:border-zinc-800">
+              <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+                {DAYS}-day window
+              </span>
               <Link
                 href="/items"
-                className="ml-auto text-[10px] uppercase tracking-widest text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+                className="text-[10px] uppercase tracking-widest text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
               >
                 items →
               </Link>
@@ -145,18 +146,25 @@ export default async function Cockpit() {
             </div>
 
             {sess.dailyBurn.length > 0 && (
-              <div className="flex items-end gap-px h-8 mt-3">
-                {sess.dailyBurn.map((d) => {
-                  const pct = Math.max(2, (d.tokens / maxBurn) * 100);
-                  return (
-                    <div
-                      key={d.date}
-                      className="flex-1 bg-zinc-300 dark:bg-zinc-700"
-                      style={{ height: `${pct}%` }}
-                      title={`${d.date}: ${shortNumber(d.tokens)}`}
-                    />
-                  );
-                })}
+              <div className="mt-3">
+                <div className="flex items-end gap-px h-8">
+                  {sess.dailyBurn.map((d) => {
+                    const pct = Math.max(2, (d.tokens / maxBurn) * 100);
+                    return (
+                      <div
+                        key={d.date}
+                        className="flex-1 bg-zinc-300 dark:bg-zinc-700"
+                        style={{ height: `${pct}%` }}
+                        title={`${d.date}: ${shortNumber(d.tokens)}`}
+                      />
+                    );
+                  })}
+                </div>
+                <div className="flex items-center justify-between mt-1 text-[10px] uppercase tracking-widest text-zinc-500 tabular-nums">
+                  <span>{sess.dailyBurn[0].date.slice(5)}</span>
+                  <span>{sess.dailyBurn.length} active days</span>
+                  <span>{sess.dailyBurn[sess.dailyBurn.length - 1].date.slice(5)}</span>
+                </div>
               </div>
             )}
 
@@ -266,7 +274,8 @@ export default async function Cockpit() {
               <span className="ml-1 text-xs text-zinc-500 font-normal">tok</span>
             </div>
             <div className="text-[10px] uppercase tracking-widest text-zinc-500">
-              top 3 sticky sources
+              top {contextRowCount} sticky{" "}
+              {contextRowCount === 1 ? "source" : "sources"}
             </div>
 
             <ul className="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800 text-xs space-y-1 flex-1">
@@ -296,17 +305,19 @@ export default async function Cockpit() {
                   </span>
                 </li>
               )}
-              <li className="flex items-center gap-2">
-                <span className="w-10 text-right tabular-nums text-zinc-500">
-                  {fmt.format(sessionStartHookTokens)}
-                </span>
-                <span className="flex-1 truncate text-zinc-700 dark:text-zinc-300">
-                  SessionStart hooks
-                </span>
-                <span className="text-[10px] uppercase tracking-widest text-zinc-500">
-                  sticky
-                </span>
-              </li>
+              {sessionStartHookTokens > 0 && (
+                <li className="flex items-center gap-2">
+                  <span className="w-10 text-right tabular-nums text-zinc-500">
+                    {fmt.format(sessionStartHookTokens)}
+                  </span>
+                  <span className="flex-1 truncate text-zinc-700 dark:text-zinc-300">
+                    SessionStart hooks
+                  </span>
+                  <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+                    sticky
+                  </span>
+                </li>
+              )}
             </ul>
           </div>
         </section>

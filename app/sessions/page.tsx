@@ -1,5 +1,5 @@
 import { getSessions, summarizeSessions } from "@/lib/sessions";
-import { Receipt, Stat, Chip } from "../components/Receipt";
+import { Receipt, Stat } from "../components/Receipt";
 
 const fmt = new Intl.NumberFormat("en-US");
 const DAYS = 30;
@@ -31,11 +31,9 @@ export default async function SessionsPage() {
               ~/.claude/projects · {DAYS}-day window
             </p>
           </div>
-          <div className="flex items-center gap-1">
-            <Chip active>30D</Chip>
-            <Chip>7D</Chip>
-            <Chip>90D</Chip>
-          </div>
+          <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+            {DAYS}-day window
+          </span>
         </header>
 
         {s.count === 0 ? (

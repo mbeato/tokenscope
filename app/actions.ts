@@ -2,7 +2,7 @@
 
 import { readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { revalidatePath } from "next/cache";
 
 const HOME = homedir();
@@ -10,11 +10,26 @@ const CLAUDE_DIR = join(HOME, ".claude");
 const SETTINGS_PATH = join(CLAUDE_DIR, "settings.json");
 const MAX_BACKUPS = 5;
 
+// Allowed dirs are resolved once at module load so they include any symlink
+// normalization the runtime applies.
+const ALLOWED_DIRS = [
+  resolve(CLAUDE_DIR, "skills"),
+  resolve(CLAUDE_DIR, "agents"),
+  resolve(CLAUDE_DIR, "commands"),
+];
+
+/**
+ * Strict allowlist check. Resolves the input to an absolute path (collapsing
+ * `..` and symlinks at the lexical level) and confirms it lives strictly under
+ * one of the allowed dirs. Defends against traversal attacks like
+ * `~/.claude/skills/../../.zshrc` which would pass a naive `startsWith` check.
+ */
 function safeUserPath(p: string): boolean {
-  const skills = join(CLAUDE_DIR, "skills");
-  const agents = join(CLAUDE_DIR, "agents");
-  const commands = join(CLAUDE_DIR, "commands");
-  return p.startsWith(skills + "/") || p.startsWith(agents + "/") || p.startsWith(commands + "/");
+  if (typeof p !== "string" || p.length === 0) return false;
+  const resolved = resolve(p);
+  return ALLOWED_DIRS.some(
+    (allowed) => resolved === allowed || resolved.startsWith(allowed + sep)
+  );
 }
 
 async function backupSettings(): Promise<void> {
@@ -52,7 +67,9 @@ export async function toggleUserItem(filePath: string): Promise<void> {
     ? filePath.slice(0, -".disabled".length)
     : `${filePath}.disabled`;
   await rename(filePath, newPath);
-  revalidatePath("/");
+  // Invalidate every route below the root layout so toggles from /items,
+  // /sessions, /context, and / all see fresh state on next navigation.
+  revalidatePath("/", "layout");
 }
 
 export async function togglePlugin(pluginKey: string): Promise<void> {
@@ -64,7 +81,9 @@ export async function togglePlugin(pluginKey: string): Promise<void> {
   ep[pluginKey] = !current;
   parsed.enabledPlugins = ep;
   await writeFile(SETTINGS_PATH, JSON.stringify(parsed, null, 2) + "\n", "utf8");
-  revalidatePath("/");
+  // Invalidate every route below the root layout so toggles from /items,
+  // /sessions, /context, and / all see fresh state on next navigation.
+  revalidatePath("/", "layout");
 }
 
 /**
@@ -90,6 +109,8 @@ export async function disableUserItems(filePaths: string[]): Promise<{ moved: nu
       skipped++;
     }
   }
-  revalidatePath("/");
+  // Invalidate every route below the root layout so toggles from /items,
+  // /sessions, /context, and / all see fresh state on next navigation.
+  revalidatePath("/", "layout");
   return { moved, skipped };
 }

@@ -1,5 +1,8 @@
-import { getInventory, getPluginStates, summarize } from "@/lib/inventory";
+import { getInventory, summarize } from "@/lib/inventory";
 import { getUsage, lookupUsage } from "@/lib/usage";
+import { getSessions, summarizeSessions } from "@/lib/sessions";
+import { getHooks } from "@/lib/hooks";
+import { getMcpServers } from "@/lib/mcp";
 import { Receipt, Stat } from "../components/Receipt";
 import { disableUserItems, togglePlugin, toggleUserItem } from "../actions";
 
@@ -16,13 +19,23 @@ function daysAgo(epochMs: number): string {
   return `${d}d`;
 }
 
+function shortNumber(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 export default async function ItemsPage() {
-  const [items, usage, pluginStates] = await Promise.all([
+  const [items, usage, sessions, hooks, mcpServers] = await Promise.all([
     getInventory(),
     getUsage(DAYS),
-    getPluginStates(),
+    getSessions(DAYS),
+    getHooks(),
+    getMcpServers(),
   ]);
   const inv = summarize(items);
+  const sess = summarizeSessions(sessions);
 
   const annotated = items.map((it) => ({ ...it, ...lookupUsage(it, usage) }));
   const sorted = [...annotated].sort((a, b) => {
@@ -38,6 +51,18 @@ export default async function ItemsPage() {
   );
   const userUnusedSavings = userUnused.reduce((acc, a) => acc + a.perTurnTokens, 0);
 
+  // Other recommendations
+  const sessionStartHookTokens = hooks
+    .filter((h) => h.event === "SessionStart" && h.status === "measured")
+    .reduce((acc, h) => acc + h.perTurnTokens, 0);
+  const p75 = (() => {
+    if (sessions.length === 0) return 0;
+    const sorted = [...sessions].map((s) => s.totalTokens).sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.75))];
+  })();
+  const longSessionCount = sessions.filter((s) => s.totalTokens > p75).length;
+  const directMcpCount = mcpServers.filter((m) => !m.isPtc).length;
+
   return (
     <main className="flex-1 font-mono bg-zinc-50 dark:bg-zinc-950">
       <div className="max-w-6xl mx-auto px-6 py-10">
@@ -52,6 +77,15 @@ export default async function ItemsPage() {
             {inv.totalItems} loaded · {fmt.format(inv.totalPerTurnTokens)} tok/turn
           </code>
         </header>
+
+        <p className="mb-6 text-[10px] uppercase tracking-widest text-zinc-500">
+          toggles apply on next Claude Code restart · plugin toggles snapshot{" "}
+          <code className="normal-case tracking-normal">settings.json</code> to{" "}
+          <code className="normal-case tracking-normal">
+            ~/.claude/settings.json.usage-bak-&lt;ts&gt;
+          </code>{" "}
+          (5 most recent kept)
+        </p>
 
         {/* Vital signs row */}
         <section className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
@@ -69,10 +103,14 @@ export default async function ItemsPage() {
           </Receipt>
         </section>
 
-        {/* Recommendation — kept as amber-tinted callout but wrapped in receipt chrome */}
-        {userUnused.length > 0 && (
-          <section className="mb-6">
-            <Receipt label="recommendation" pad="default" className="border-amber-300 dark:border-amber-900/50 bg-amber-50/40 dark:bg-amber-950/10">
+        {/* Recommendations — bulk action + cross-signal nudges */}
+        <section className="mb-6 space-y-3">
+          {userUnused.length > 0 && (
+            <Receipt
+              label={`recommendation · ${userUnused.length} unused`}
+              pad="default"
+              className="border-amber-300 dark:border-amber-900/50 bg-amber-50/40 dark:bg-amber-950/10"
+            >
               <div className="flex items-start gap-4 flex-wrap">
                 <div className="flex-1 min-w-[280px]">
                   <div className="text-sm text-zinc-700 dark:text-zinc-300">
@@ -105,8 +143,54 @@ export default async function ItemsPage() {
                 </form>
               </div>
             </Receipt>
-          </section>
-        )}
+          )}
+
+          {sessionStartHookTokens > 0 && (
+            <Receipt label="recommendation · sticky hook overhead" pad="default" className="border-zinc-200 dark:border-zinc-800">
+              <div className="text-sm text-zinc-700 dark:text-zinc-300">
+                <span className="text-2xl font-semibold tabular-nums tracking-tight mr-2">
+                  {fmt.format(sessionStartHookTokens)}
+                </span>
+                tokens injected by SessionStart hooks every session.
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Sticky until restart — that overhead compounds across every turn in the session. If
+                you don&apos;t rely on the injected content, edit{" "}
+                <code>hooks.SessionStart</code> in <code>~/.claude/settings.json</code>.
+              </div>
+            </Receipt>
+          )}
+
+          {longSessionCount > 0 && p75 > 0 && (
+            <Receipt label="recommendation · long-session outliers" pad="default" className="border-zinc-200 dark:border-zinc-800">
+              <div className="text-sm text-zinc-700 dark:text-zinc-300">
+                <span className="text-2xl font-semibold tabular-nums tracking-tight mr-2">
+                  {longSessionCount}
+                </span>
+                sessions exceeded your p75 ({shortNumber(p75)} tokens) in the last {DAYS} days.
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Long sessions amplify every per-turn cost — even small baseline overhead becomes
+                huge when re-fed 1000+ times. Use <code>/clear</code> between unrelated tasks.
+              </div>
+            </Receipt>
+          )}
+
+          {directMcpCount > 1 && (
+            <Receipt label="recommendation · mcp consolidation" pad="default" className="border-zinc-200 dark:border-zinc-800">
+              <div className="text-sm text-zinc-700 dark:text-zinc-300">
+                <span className="text-2xl font-semibold tabular-nums tracking-tight mr-2">
+                  {directMcpCount}
+                </span>
+                MCP servers registered directly.
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">
+                Each direct server adds its tool descriptions to the deferred-tools list. Routing
+                through PTC (Programmatic Tool Calling) replaces all of them with 3 generic tools.
+              </div>
+            </Receipt>
+          )}
+        </section>
 
         {/* By plugin */}
         <section className="mb-6">
@@ -125,7 +209,12 @@ export default async function ItemsPage() {
                 {inv.byPlugin.map((p) => {
                   const sample = items.find((it) => it.plugin === p.plugin);
                   const key = sample?.pluginKey;
-                  const enabled = pluginStates.find((ps) => ps.key === key)?.enabled ?? true;
+                  // Source of truth = the inventory item's `disabled` field
+                  // (computed in lib/inventory.ts from the same enabledPlugins
+                  // map, treating missing-from-settings as disabled). Falling
+                  // back to pluginStates would silently mis-render `on` for
+                  // plugins on-disk-but-not-in-settings.json.
+                  const enabled = sample ? !sample.disabled : false;
                   return (
                     <tr key={p.plugin} className="border-b border-zinc-200/60 dark:border-zinc-800/60 last:border-b-0 hover:bg-zinc-50 dark:hover:bg-zinc-950/40 transition-colors">
                       <td className="px-5 py-3">{p.plugin}</td>
@@ -173,12 +262,15 @@ export default async function ItemsPage() {
               <tbody>
                 {sorted.map((it) => {
                   const candidate = !it.disabled && it.invocations === 0;
+                  const rowTint = it.disabled
+                    ? "opacity-50"
+                    : candidate
+                      ? "bg-red-50/40 dark:bg-red-950/20 hover:bg-red-50/60 dark:hover:bg-red-950/30"
+                      : "hover:bg-zinc-50 dark:hover:bg-zinc-950/40";
                   return (
                     <tr
                       key={it.filePath}
-                      className={`border-b border-zinc-200/60 dark:border-zinc-800/60 last:border-b-0 hover:bg-zinc-50 dark:hover:bg-zinc-950/40 transition-colors ${
-                        it.disabled ? "opacity-50" : ""
-                      }`}
+                      className={`border-b border-zinc-200/60 dark:border-zinc-800/60 last:border-b-0 transition-colors ${rowTint}`}
                       title={it.description}
                     >
                       <td className="px-5 py-3">
