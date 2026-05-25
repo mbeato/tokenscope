@@ -7,15 +7,15 @@ A local dashboard that audits the **per-turn token context** Claude Code loads o
 ## Install + run
 
 ```bash
-npx contextscope
+npx @mbeato/contextscope
 ```
 
 Picks a free port starting at 3939, opens your browser, audits in real time.
 
-Or install globally so the command stays around:
+Or install globally so the `contextscope` command stays around:
 
 ```bash
-npm install -g contextscope
+npm install -g @mbeato/contextscope
 contextscope
 ```
 
