@@ -75,7 +75,7 @@ export default async function Cockpit() {
   return (
     <main className="flex-1 font-mono bg-zinc-50 dark:bg-zinc-950">
       <div className="max-w-6xl mx-auto px-6 py-10">
-        <header className="mb-8 flex items-baseline justify-between">
+        <header className="mb-8 flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2">
           <div>
             <h1 className="text-xl font-semibold tracking-tight">tokenscope</h1>
             <p className="text-[10px] uppercase tracking-widest text-zinc-500 mt-1">
