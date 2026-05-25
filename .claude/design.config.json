@@ -1,0 +1,25 @@
+{
+  "designSystem": {
+    "doc": "DESIGN.md",
+    "tokens": "app/globals.css"
+  },
+  "stack": "tailwind",
+  "iconLib": "@tabler/icons-react",
+  "tokenPattern": "--color-*",
+  "constraints": {
+    "forbiddenFonts": ["Inter", "Geist", "IBM Plex", "JetBrains Mono"],
+    "forbiddenIconLibs": ["lucide-react", "react-icons", "@heroicons/react"],
+    "forbiddenComponentLibs": ["shadcn/ui", "@radix-ui/themes", "@nextui-org/react", "antd", "mui"],
+    "motionKeyframes": ["pulse"]
+  },
+  "corpusTags": ["dashboard", "analytics", "dev-tools", "data-dense", "terminal-aesthetic"],
+  "primitives": [],
+  "referencePages": [
+    "app/loading.tsx"
+  ],
+  "playwright": {
+    "devUrlBase": "http://localhost:3000",
+    "viewport": { "width": 1440, "height": 900 },
+    "firstLoadTimeoutMs": 90000
+  }
+}
