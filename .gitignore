@@ -50,3 +50,4 @@ dist
 .turbo
 .vercel
 !.env.publish.example
+cc.json
