@@ -78,8 +78,18 @@ function inferProjectPath(dirName: string): string {
 
 async function parseFile(filePath: string, mtimeMs: number): Promise<TranscriptResult> {
   const parts = filePath.split("/");
-  const sessionId = parts[parts.length - 1].replace(/\.jsonl$/, "");
-  const project = parts[parts.length - 2] ?? "";
+  // Two shapes:
+  //   <project>/<session-uuid>.jsonl                          → main session file
+  //   <project>/<session-uuid>/subagents/agent-<id>.jsonl     → subagent file
+  // For subagents we want the parent session UUID + parent project, so the
+  // tokens roll up to the same Session as the main file.
+  const isSubagent = parts[parts.length - 2] === "subagents";
+  const sessionId = isSubagent
+    ? (parts[parts.length - 3] ?? "")
+    : parts[parts.length - 1].replace(/\.jsonl$/, "");
+  const project = isSubagent
+    ? (parts[parts.length - 4] ?? "")
+    : (parts[parts.length - 2] ?? "");
   const result: TranscriptResult = {
     filePath,
     mtimeMs,
@@ -227,30 +237,62 @@ async function pMapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<
 }
 
 /**
- * Walk raw per-file results oldest first; attribute each unique message UUID
- * to the earliest file that mentions it. Returns new TranscriptResult objects
- * with totals/byModel/timestamps recomputed from the surviving records.
+ * Walk raw per-file results oldest first, dedup messages globally by
+ * (msg.id, requestId), and merge multiple files belonging to the same logical
+ * session (main + subagents/*) into one TranscriptResult per session.
  *
- * Important: do NOT mutate the cached `raws` objects — clone fields we rewrite.
+ * Important: do NOT mutate the cached `raws` objects — they're shared across
+ * calls.
  */
 function dedupAndSum(raws: TranscriptResult[]): TranscriptResult[] {
   const sorted = [...raws].sort((a, b) => a.mtimeMs - b.mtimeMs);
   const seen = new Set<string>();
-  return sorted.map((r) => {
-    const t: TranscriptResult = {
-      ...r,
-      startTime: 0,
-      endTime: 0,
-      turnCount: 0,
-      inputTokens: 0,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      outputTokens: 0,
-      byModel: {},
-      models: [],
-      sidechainTurns: 0,
-    };
-    const modelSet = new Set<string>();
+  const merged = new Map<string, TranscriptResult>();
+
+  for (const r of sorted) {
+    const key = `${r.project}\x00${r.sessionId}`;
+    let t = merged.get(key);
+    if (!t) {
+      t = {
+        filePath: r.filePath,
+        mtimeMs: r.mtimeMs,
+        sessionId: r.sessionId,
+        project: r.project,
+        projectPath: r.projectPath,
+        startTime: 0,
+        endTime: 0,
+        turnCount: 0,
+        models: [],
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
+        byModel: {},
+        usageRecords: [],
+        invocations: [],
+        toolCalls: {},
+        toolErrors: 0,
+        sidechainTurns: 0,
+      };
+      merged.set(key, t);
+    } else {
+      // Prefer the main session file's path/mtime as the canonical reference;
+      // a subagent file landed first only if no main yet, which is rare.
+      const incomingIsMain = !r.filePath.includes("/subagents/");
+      if (incomingIsMain) {
+        t.filePath = r.filePath;
+        t.mtimeMs = Math.max(t.mtimeMs, r.mtimeMs);
+      }
+    }
+
+    // Accumulate ancillary fields
+    for (const inv of r.invocations) t.invocations.push(inv);
+    for (const [name, n] of Object.entries(r.toolCalls)) {
+      t.toolCalls[name] = (t.toolCalls[name] ?? 0) + n;
+    }
+    t.toolErrors += r.toolErrors;
+
+    const modelSet = new Set<string>(t.models);
     for (const u of r.usageRecords) {
       if (u.dedupKey) {
         if (seen.has(u.dedupKey)) continue;
@@ -282,11 +324,47 @@ function dedupAndSum(raws: TranscriptResult[]): TranscriptResult[] {
       }
     }
     t.models = [...modelSet];
-    return t;
-  });
+  }
+
+  return [...merged.values()];
 }
 
-/** Scan all transcripts modified in the last N days. Deduped across resumed sessions. */
+async function collectJsonlFiles(
+  dir: string,
+  cutoff: number,
+  out: { filePath: string; mtimeMs: number }[],
+  depth: number = 0
+): Promise<void> {
+  if (depth > 3) return; // <project>/<session>/subagents/<file> is the deepest expected shape
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    const fp = join(dir, e.name);
+    if (e.isDirectory()) {
+      await collectJsonlFiles(fp, cutoff, out, depth + 1);
+      continue;
+    }
+    if (!e.isFile() || !e.name.endsWith(".jsonl")) continue;
+    try {
+      const st = await stat(fp);
+      if (st.mtimeMs >= cutoff) out.push({ filePath: fp, mtimeMs: st.mtimeMs });
+    } catch {
+      // skip
+    }
+  }
+}
+
+/**
+ * Scan all transcripts modified in the last N days. Scans both main session
+ * files (<project>/<session>.jsonl) and subagent files
+ * (<project>/<session>/subagents/agent-*.jsonl), then attributes subagent
+ * tokens to their parent session via shared sessionId. Deduped globally by
+ * (msg.id, requestId).
+ */
 export async function getAllTranscripts(daysBack: number = 30): Promise<TranscriptResult[]> {
   const cutoff = Date.now() - daysBack * 24 * 60 * 60 * 1000;
   let projDirs: import("node:fs").Dirent[];
@@ -299,23 +377,7 @@ export async function getAllTranscripts(daysBack: number = 30): Promise<Transcri
   await Promise.all(
     projDirs.map(async (d) => {
       if (!d.isDirectory()) return;
-      const dir = join(PROJECTS_DIR, String(d.name));
-      let entries;
-      try {
-        entries = await readdir(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const e of entries) {
-        if (!e.isFile() || !e.name.endsWith(".jsonl")) continue;
-        const fp = join(dir, e.name);
-        try {
-          const st = await stat(fp);
-          if (st.mtimeMs >= cutoff) candidates.push({ filePath: fp, mtimeMs: st.mtimeMs });
-        } catch {
-          // skip
-        }
-      }
+      await collectJsonlFiles(join(PROJECTS_DIR, String(d.name)), cutoff, candidates);
     })
   );
   const raws = await pMapLimit(candidates, 16, (c) => getFileResult(c.filePath, c.mtimeMs));

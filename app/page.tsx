@@ -330,7 +330,7 @@ export default async function Cockpit() {
 
         <footer className="mt-8 pt-4 border-t border-zinc-200 dark:border-zinc-800 text-[10px] uppercase tracking-widest text-zinc-500 flex items-center justify-between">
           <span>
-            cl100k_base · cost deduped per msg.id (cc splits one msg across lines · ccusage daily sums dupes) · toggles apply on next cc restart
+            cl100k_base · scans main + subagent jsonls · deduped per (msg.id, requestid) · 1hr cache priced separately at 2x 5min rate · toggles apply on next cc restart
           </span>
           <a
             href="https://github.com/mbeato/contextscope"
