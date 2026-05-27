@@ -148,27 +148,43 @@ async function main() {
     stdio: "inherit",
   });
 
-  // Open browser once server is ready. Sequential polling (await between
-  // attempts) so we never have concurrent fetches racing to call open().
+  process.stdout.write(`contextscope running on ${url}\n`);
+
+  // Wait for server to respond, warm the cache by hitting `/` (which triggers
+  // the heavy transcript scans), then open the browser. Shifts the cold wait
+  // from "blank skeleton in browser" to "scanning... in terminal" so the page
+  // renders almost instantly when the browser opens.
   if (!noOpen) {
     const { default: open } = await import("open");
     (async () => {
+      // Probe readiness with a path that doesn't trigger the scans.
+      let ready = false;
       for (let i = 0; i < 50; i++) {
         try {
-          const res = await fetch(url, { method: "HEAD" });
+          const res = await fetch(`${url}/_not-found`, { method: "HEAD" });
           if (res.status < 500) {
-            await open(url).catch(() => {});
-            return;
+            ready = true;
+            break;
           }
         } catch {
           // not yet ready
         }
         await new Promise((r) => setTimeout(r, 200));
       }
+      if (!ready) return;
+      process.stdout.write(`  scanning ~/.claude/projects ...`);
+      const start = Date.now();
+      try {
+        await fetch(url);
+      } catch {
+        // best-effort warm-up; open browser anyway
+      }
+      process.stdout.write(` ${((Date.now() - start) / 1000).toFixed(1)}s\n`);
+      await open(url).catch(() => {});
     })();
   }
 
-  process.stdout.write(`contextscope running on ${url}\n  (Ctrl+C to stop)\n`);
+  process.stdout.write(`  (Ctrl+C to stop)\n`);
 
   const shutdown = (code = 0) => {
     if (!child.killed) child.kill("SIGTERM");
