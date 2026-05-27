@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { getSessions, summarizeSessions } from "@/lib/sessions";
+import { formatUsd } from "@/lib/pricing";
 import { Receipt, Stat } from "../components/Receipt";
 
 const fmt = new Intl.NumberFormat("en-US");
@@ -56,7 +57,7 @@ export default async function SessionsPage() {
                 <Stat label="sessions" value={fmt.format(s.count)} hint={`avg ${shortNumber(s.averageSessionTokens)}`} />
               </Receipt>
               <Receipt pad="default">
-                <Stat label="30d total" value={shortNumber(s.totalTokens)} hint="all tokens" />
+                <Stat label="30d total" value={shortNumber(s.totalTokens)} hint={`${formatUsd(s.totalCostUsd)} api`} />
               </Receipt>
               <Receipt pad="default">
                 <Stat label="median" value={shortNumber(s.medianSessionTokens)} hint="per session" />
@@ -80,7 +81,7 @@ export default async function SessionsPage() {
 
             {/* Daily burn */}
             <section className="mb-6">
-              <Receipt label={`daily burn · ${s.dailyBurn.length} active days`}>
+              <Receipt label={`daily burn · ${s.dailyBurn.length} active days · ${formatUsd(s.totalCostUsd)} api total`}>
                 <div className="space-y-1">
                   {s.dailyBurn.map((d) => {
                     const pct = (d.tokens / maxDayTokens) * 100;
@@ -92,6 +93,9 @@ export default async function SessionsPage() {
                         </div>
                         <div className="w-20 text-right tabular-nums text-zinc-700 dark:text-zinc-300">
                           {shortNumber(d.tokens)}
+                        </div>
+                        <div className="w-16 text-right tabular-nums text-zinc-500">
+                          {formatUsd(d.cost)}
                         </div>
                       </div>
                     );
@@ -111,6 +115,7 @@ export default async function SessionsPage() {
                       <th className="px-5 py-3 font-normal">models</th>
                       <th className="px-5 py-3 font-normal text-right">turns</th>
                       <th className="px-5 py-3 font-normal text-right">tokens</th>
+                      <th className="px-5 py-3 font-normal text-right">api</th>
                       <th className="px-5 py-3 font-normal text-right">cache hit</th>
                     </tr>
                   </thead>
@@ -131,6 +136,7 @@ export default async function SessionsPage() {
                           </td>
                           <td className="px-5 py-3 text-right tabular-nums">{session.turnCount}</td>
                           <td className="px-5 py-3 text-right tabular-nums">{shortNumber(session.totalTokens)}</td>
+                          <td className="px-5 py-3 text-right tabular-nums text-zinc-500">{formatUsd(session.costUsd)}</td>
                           <td className="px-5 py-3 text-right tabular-nums text-zinc-500">{hit.toFixed(1)}%</td>
                         </tr>
                       );
@@ -150,6 +156,7 @@ export default async function SessionsPage() {
                       <th className="px-5 py-3 font-normal text-right">sessions</th>
                       <th className="px-5 py-3 font-normal text-right">turns</th>
                       <th className="px-5 py-3 font-normal text-right">total</th>
+                      <th className="px-5 py-3 font-normal text-right">api</th>
                       <th className="px-5 py-3 font-normal text-right">share</th>
                     </tr>
                   </thead>
@@ -164,6 +171,7 @@ export default async function SessionsPage() {
                           <td className="px-5 py-3 text-right tabular-nums text-zinc-500">{p.count}</td>
                           <td className="px-5 py-3 text-right tabular-nums">{fmt.format(p.turns)}</td>
                           <td className="px-5 py-3 text-right tabular-nums">{shortNumber(p.tokens)}</td>
+                          <td className="px-5 py-3 text-right tabular-nums text-zinc-500">{formatUsd(p.cost)}</td>
                           <td className="px-5 py-3 text-right tabular-nums text-zinc-500">{share.toFixed(1)}%</td>
                         </tr>
                       );

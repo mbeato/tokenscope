@@ -6,7 +6,10 @@
  *   - invocations (Skill / Agent tool_use events)  -> consumed by lib/usage.ts
  *   - session stats (turn count, token usage)      -> consumed by lib/sessions.ts
  *
- * Subsequent page loads reuse cached results when mtime is unchanged.
+ * CC creates a new JSONL when you `--continue` a session, which replays the
+ * prior turns. To match ccusage's totals we dedup messages by `msg.id:requestId`
+ * across all files at aggregate time. Per-file records are cached unchanged
+ * (preserves mtime cache); dedupAndSum runs on every getAllTranscripts call.
  */
 import { readdir, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -18,6 +21,28 @@ const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 
 export type Invocation = { kind: "skill" | "agent"; name: string; ts: number };
 
+export type ModelUsage = {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreation5mTokens: number;
+  cacheCreation1hTokens: number;
+  outputTokens: number;
+};
+
+export type UsageRecord = {
+  // `${message.id}:${requestId}` — same key ccusage uses. Empty string if msg
+  // lacked an id (treat as un-dedupable; count it).
+  dedupKey: string;
+  model: string;
+  ts: number;
+  input: number;
+  cacheRead: number;
+  cacheCreation5m: number;
+  cacheCreation1h: number;
+  output: number;
+  isSidechain: boolean;
+};
+
 export type TranscriptResult = {
   filePath: string;
   mtimeMs: number;
@@ -28,20 +53,22 @@ export type TranscriptResult = {
   endTime: number;
   turnCount: number;
   models: string[];
+  // Aggregate totals — sums after dedup (when produced via getAllTranscripts).
+  // On raw parseFile output these are pre-dedup; getAllTranscripts rebuilds them.
   inputTokens: number;
   cacheReadTokens: number;
-  cacheCreationTokens: number;
+  cacheCreationTokens: number;   // total: 5m + 1h
   outputTokens: number;
+  byModel: Record<string, ModelUsage>;
+  // Per-message records — kept on the cached result so dedup at aggregate time
+  // is exact across resumed sessions.
+  usageRecords: UsageRecord[];
   invocations: Invocation[];
-  toolCalls: Record<string, number>;  // tool name -> count
-  toolErrors: number;                  // total tool_result with is_error: true
-  sidechainTurns: number;              // turns with isSidechain: true (subagent context)
+  toolCalls: Record<string, number>;
+  toolErrors: number;
+  sidechainTurns: number;
 };
 
-// Module-level cache: persists across server-component renders within the same
-// Next.js dev/prod process. Keyed by filePath; invalidated on mtime change.
-// Capped via simple FIFO eviction (Map preserves insertion order) so a
-// long-running process scanning thousands of transcripts can't grow unbounded.
 const cache = new Map<string, TranscriptResult>();
 const MAX_CACHE_ENTRIES = 5000;
 
@@ -67,12 +94,13 @@ async function parseFile(filePath: string, mtimeMs: number): Promise<TranscriptR
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     outputTokens: 0,
+    byModel: {},
+    usageRecords: [],
     invocations: [],
     toolCalls: {},
     toolErrors: 0,
     sidechainTurns: 0,
   };
-  const modelSet = new Set<string>();
 
   return new Promise((resolve) => {
     const rl = createInterface({
@@ -81,7 +109,6 @@ async function parseFile(filePath: string, mtimeMs: number): Promise<TranscriptR
     });
     rl.on("line", (line) => {
       if (!line || line[0] !== "{") return;
-      // Prefilter: usage events, tool_use events, and tool_result events (for errors).
       const hasUsage = line.includes('"usage"');
       const hasToolUse = line.includes('"tool_use"');
       const hasToolResult = line.includes('"tool_result"');
@@ -94,29 +121,49 @@ async function parseFile(filePath: string, mtimeMs: number): Promise<TranscriptR
         return;
       }
       const msg = rec.message as
-        | { model?: string; usage?: Record<string, unknown>; content?: unknown }
+        | { id?: string; model?: string; usage?: Record<string, unknown>; content?: unknown }
         | undefined;
       const tsRaw = rec.timestamp;
       const tsMs = typeof tsRaw === "string" ? Date.parse(tsRaw) : NaN;
       const isSidechain = rec.isSidechain === true;
 
-      // Usage aggregation (assistant messages)
       const usage = msg?.usage;
       if (usage) {
-        result.inputTokens += Number(usage.input_tokens) || 0;
-        result.cacheReadTokens += Number(usage.cache_read_input_tokens) || 0;
-        result.cacheCreationTokens += Number(usage.cache_creation_input_tokens) || 0;
-        result.outputTokens += Number(usage.output_tokens) || 0;
-        result.turnCount += 1;
-        if (isSidechain) result.sidechainTurns += 1;
-        if (msg?.model) modelSet.add(msg.model);
-        if (Number.isFinite(tsMs)) {
-          if (!result.startTime || tsMs < result.startTime) result.startTime = tsMs;
-          if (tsMs > result.endTime) result.endTime = tsMs;
+        const msgId = typeof msg?.id === "string" ? msg.id : "";
+        const requestId = typeof rec.requestId === "string" ? rec.requestId : "";
+        const dedupKey = msgId ? `${msgId}:${requestId}` : "";
+        // cache_creation may have an ephemeral_{5m,1h}_input_tokens breakdown
+        // (priced separately at $6.25/M vs $10/M for opus-4-7). Older transcripts
+        // lack the sub-object — fall back to treating the total as 5min.
+        const ccTotal = Number(usage.cache_creation_input_tokens) || 0;
+        const ccBreakdown = (usage.cache_creation ?? null) as
+          | { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }
+          | null;
+        let cc5m = 0;
+        let cc1h = 0;
+        if (ccBreakdown && typeof ccBreakdown === "object") {
+          cc5m = Number(ccBreakdown.ephemeral_5m_input_tokens) || 0;
+          cc1h = Number(ccBreakdown.ephemeral_1h_input_tokens) || 0;
+          // If breakdown is present but sum doesn't match the parent total,
+          // trust the parent and attribute the diff to 5min (conservative).
+          const diff = ccTotal - (cc5m + cc1h);
+          if (diff > 0) cc5m += diff;
+        } else {
+          cc5m = ccTotal;
         }
+        result.usageRecords.push({
+          dedupKey,
+          model: msg?.model || "<synthetic>",
+          ts: Number.isFinite(tsMs) ? tsMs : 0,
+          input: Number(usage.input_tokens) || 0,
+          cacheRead: Number(usage.cache_read_input_tokens) || 0,
+          cacheCreation5m: cc5m,
+          cacheCreation1h: cc1h,
+          output: Number(usage.output_tokens) || 0,
+          isSidechain,
+        });
       }
 
-      // Content scan: tool_use (counts + invocations) and tool_result (errors)
       if (Array.isArray(msg?.content)) {
         for (const c of msg.content) {
           if (!c || typeof c !== "object") continue;
@@ -146,14 +193,8 @@ async function parseFile(filePath: string, mtimeMs: number): Promise<TranscriptR
         }
       }
     });
-    rl.on("close", () => {
-      result.models = [...modelSet];
-      resolve(result);
-    });
-    rl.on("error", () => {
-      result.models = [...modelSet];
-      resolve(result);
-    });
+    rl.on("close", () => resolve(result));
+    rl.on("error", () => resolve(result));
   });
 }
 
@@ -161,7 +202,7 @@ async function getFileResult(filePath: string, mtimeMs: number): Promise<Transcr
   const cached = cache.get(filePath);
   if (cached && cached.mtimeMs === mtimeMs) return cached;
   const fresh = await parseFile(filePath, mtimeMs);
-  if (cached) cache.delete(filePath); // re-insert at tail so FIFO eviction stays correct
+  if (cached) cache.delete(filePath);
   cache.set(filePath, fresh);
   while (cache.size > MAX_CACHE_ENTRIES) {
     const oldest = cache.keys().next().value;
@@ -185,7 +226,67 @@ async function pMapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<
   return out;
 }
 
-/** Scan all transcripts modified in the last N days. Cached per (filePath, mtime). */
+/**
+ * Walk raw per-file results oldest first; attribute each unique message UUID
+ * to the earliest file that mentions it. Returns new TranscriptResult objects
+ * with totals/byModel/timestamps recomputed from the surviving records.
+ *
+ * Important: do NOT mutate the cached `raws` objects — clone fields we rewrite.
+ */
+function dedupAndSum(raws: TranscriptResult[]): TranscriptResult[] {
+  const sorted = [...raws].sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const seen = new Set<string>();
+  return sorted.map((r) => {
+    const t: TranscriptResult = {
+      ...r,
+      startTime: 0,
+      endTime: 0,
+      turnCount: 0,
+      inputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      outputTokens: 0,
+      byModel: {},
+      models: [],
+      sidechainTurns: 0,
+    };
+    const modelSet = new Set<string>();
+    for (const u of r.usageRecords) {
+      if (u.dedupKey) {
+        if (seen.has(u.dedupKey)) continue;
+        seen.add(u.dedupKey);
+      }
+      t.inputTokens += u.input;
+      t.cacheReadTokens += u.cacheRead;
+      t.cacheCreationTokens += u.cacheCreation5m + u.cacheCreation1h;
+      t.outputTokens += u.output;
+      t.turnCount += 1;
+      if (u.isSidechain) t.sidechainTurns += 1;
+      modelSet.add(u.model);
+      const bm = t.byModel[u.model] ?? {
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreation5mTokens: 0,
+        cacheCreation1hTokens: 0,
+        outputTokens: 0,
+      };
+      bm.inputTokens += u.input;
+      bm.cacheReadTokens += u.cacheRead;
+      bm.cacheCreation5mTokens += u.cacheCreation5m;
+      bm.cacheCreation1hTokens += u.cacheCreation1h;
+      bm.outputTokens += u.output;
+      t.byModel[u.model] = bm;
+      if (u.ts > 0) {
+        if (!t.startTime || u.ts < t.startTime) t.startTime = u.ts;
+        if (u.ts > t.endTime) t.endTime = u.ts;
+      }
+    }
+    t.models = [...modelSet];
+    return t;
+  });
+}
+
+/** Scan all transcripts modified in the last N days. Deduped across resumed sessions. */
 export async function getAllTranscripts(daysBack: number = 30): Promise<TranscriptResult[]> {
   const cutoff = Date.now() - daysBack * 24 * 60 * 60 * 1000;
   let projDirs: import("node:fs").Dirent[];
@@ -217,5 +318,6 @@ export async function getAllTranscripts(daysBack: number = 30): Promise<Transcri
       }
     })
   );
-  return pMapLimit(candidates, 16, (c) => getFileResult(c.filePath, c.mtimeMs));
+  const raws = await pMapLimit(candidates, 16, (c) => getFileResult(c.filePath, c.mtimeMs));
+  return dedupAndSum(raws);
 }

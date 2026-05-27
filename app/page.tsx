@@ -22,6 +22,7 @@ import { getUsage, lookupUsage } from "@/lib/usage";
 import { getSessions, summarizeSessions } from "@/lib/sessions";
 import { getContextFiles } from "@/lib/files";
 import { getHooks } from "@/lib/hooks";
+import { formatUsd } from "@/lib/pricing";
 import { MiniStat } from "./components/Receipt";
 import { toggleUserItem } from "./actions";
 
@@ -143,6 +144,11 @@ export default async function Cockpit() {
             <div className="mt-1.5 text-2xl font-semibold tabular-nums tracking-tight text-zinc-900 dark:text-zinc-50">
               {shortNumber(sess.totalTokens)}
               <span className="ml-1 text-xs text-zinc-500 font-normal">tok</span>
+              <span className="ml-2 text-xs text-zinc-500 font-normal">·</span>
+              <span className="ml-2 text-base font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                {formatUsd(sess.totalCostUsd)}
+              </span>
+              <span className="ml-1 text-xs text-zinc-500 font-normal">api</span>
             </div>
 
             {sess.dailyBurn.length > 0 && (
@@ -155,7 +161,7 @@ export default async function Cockpit() {
                         key={d.date}
                         className="flex-1 bg-zinc-300 dark:bg-zinc-700"
                         style={{ height: `${pct}%` }}
-                        title={`${d.date}: ${shortNumber(d.tokens)}`}
+                        title={`${d.date}: ${shortNumber(d.tokens)} · ${formatUsd(d.cost)}`}
                       />
                     );
                   })}
@@ -324,7 +330,7 @@ export default async function Cockpit() {
 
         <footer className="mt-8 pt-4 border-t border-zinc-200 dark:border-zinc-800 text-[10px] uppercase tracking-widest text-zinc-500 flex items-center justify-between">
           <span>
-            cl100k_base · re-scanned every load · toggles apply on next CC restart
+            cl100k_base · cost deduped per msg.id (cc splits one msg across lines · ccusage daily sums dupes) · toggles apply on next cc restart
           </span>
           <a
             href="https://github.com/mbeato/contextscope"

@@ -1,4 +1,5 @@
 import { getAllTranscripts, type TranscriptResult } from "./transcripts";
+import { costForUsage } from "./pricing";
 
 export type Session = {
   sessionId: string;
@@ -14,10 +15,25 @@ export type Session = {
   cacheCreationTokens: number;
   outputTokens: number;
   totalTokens: number;
+  costUsd: number;
   toolCalls: Record<string, number>;
   toolErrors: number;
   sidechainTurns: number;
 };
+
+function computeCost(t: TranscriptResult): number {
+  let cost = 0;
+  for (const [model, u] of Object.entries(t.byModel)) {
+    cost += costForUsage(model, {
+      input: u.inputTokens,
+      output: u.outputTokens,
+      cacheRead: u.cacheReadTokens,
+      cacheCreation5m: u.cacheCreation5mTokens,
+      cacheCreation1h: u.cacheCreation1hTokens,
+    });
+  }
+  return cost;
+}
 
 function toSession(t: TranscriptResult): Session {
   const totalTokens =
@@ -36,6 +52,7 @@ function toSession(t: TranscriptResult): Session {
     cacheCreationTokens: t.cacheCreationTokens,
     outputTokens: t.outputTokens,
     totalTokens,
+    costUsd: computeCost(t),
     toolCalls: t.toolCalls,
     toolErrors: t.toolErrors,
     sidechainTurns: t.sidechainTurns,
@@ -55,14 +72,15 @@ export type SessionsSummary = {
   totalTokens: number;
   totalOutputTokens: number;
   totalInputPlusCache: number;
+  totalCostUsd: number;
   cacheHitRatio: number;
   outputInputRatio: number;
   averageSessionTokens: number;
   medianSessionTokens: number;
   p95SessionTokens: number;
   longSessions: Session[];
-  dailyBurn: { date: string; tokens: number }[];
-  byProject: { project: string; projectPath: string; count: number; tokens: number; turns: number }[];
+  dailyBurn: { date: string; tokens: number; cost: number }[];
+  byProject: { project: string; projectPath: string; count: number; tokens: number; cost: number; turns: number }[];
   totalToolCalls: Record<string, number>;
   totalToolErrors: number;
   totalSidechainTurns: number;
@@ -78,6 +96,7 @@ export function summarizeSessions(sessions: Session[]): SessionsSummary {
       totalTokens: 0,
       totalOutputTokens: 0,
       totalInputPlusCache: 0,
+      totalCostUsd: 0,
       cacheHitRatio: 0,
       outputInputRatio: 0,
       averageSessionTokens: 0,
@@ -110,7 +129,7 @@ export function summarizeSessions(sessions: Session[]): SessionsSummary {
 
   const longSessions = sessions.filter((s) => s.totalTokens >= LONG_SESSION_THRESHOLD);
 
-  const byDay = new Map<string, number>();
+  const byDay = new Map<string, { tokens: number; cost: number }>();
   for (const s of sessions) {
     const ts = s.endTime || s.startTime;
     if (!ts) continue;
@@ -118,27 +137,34 @@ export function summarizeSessions(sessions: Session[]): SessionsSummary {
     const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(
       d.getUTCDate()
     ).padStart(2, "0")}`;
-    byDay.set(key, (byDay.get(key) ?? 0) + s.totalTokens);
+    const cur = byDay.get(key) ?? { tokens: 0, cost: 0 };
+    cur.tokens += s.totalTokens;
+    cur.cost += s.costUsd;
+    byDay.set(key, cur);
   }
   const dailyBurn = [...byDay.entries()]
-    .map(([date, tokens]) => ({ date, tokens }))
+    .map(([date, v]) => ({ date, tokens: v.tokens, cost: v.cost }))
     .sort((a, b) => a.date.localeCompare(b.date));
 
   // By project
   const projectMap = new Map<
     string,
-    { project: string; projectPath: string; count: number; tokens: number; turns: number }
+    { project: string; projectPath: string; count: number; tokens: number; cost: number; turns: number }
   >();
+  let totalCostUsd = 0;
   for (const s of sessions) {
+    totalCostUsd += s.costUsd;
     const cur = projectMap.get(s.project) ?? {
       project: s.project,
       projectPath: s.projectPath,
       count: 0,
       tokens: 0,
+      cost: 0,
       turns: 0,
     };
     cur.count += 1;
     cur.tokens += s.totalTokens;
+    cur.cost += s.costUsd;
     cur.turns += s.turnCount;
     projectMap.set(s.project, cur);
   }
@@ -163,6 +189,7 @@ export function summarizeSessions(sessions: Session[]): SessionsSummary {
     totalTokens: total,
     totalOutputTokens: outSum,
     totalInputPlusCache: inputPlusCache,
+    totalCostUsd,
     cacheHitRatio,
     outputInputRatio,
     averageSessionTokens: Math.round(total / sessions.length),

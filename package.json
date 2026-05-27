@@ -1,6 +1,6 @@
 {
   "name": "@mbeato/contextscope",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Local dashboard auditing Claude Code's per-turn token context (skills, agents, commands, CLAUDE.md, MEMORY.md, hooks, MCP) with toggle-based disable and session analytics.",
   "type": "module",
   "bin": {
@@ -12,6 +12,7 @@
     "start": "next start",
     "prod": "next build && next start",
     "lint": "eslint",
+    "refresh-prices": "node scripts/refresh-prices.mjs",
     "prepublishOnly": "next build",
     "release": "test -f .env.publish || (echo 'missing .env.publish — copy .env.publish.example and add your NPM_TOKEN' && exit 1) && set -a && . ./.env.publish && set +a && npm publish"
   },
